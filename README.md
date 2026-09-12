@@ -168,6 +168,29 @@ from breaking projects, a rule that did not exist before enters existing presets
 as `"off"`; promoting it is a deliberate, changelogged change. Version-pinning
 syntax may be added later, and bare names will keep floating.
 
+#### Rules that are off by default
+
+Three long-standing checks are `off` in `default`: `incorrect_call_args`,
+`missing_reference` and `unresolved_import`.
+
+Each needs a complete picture of something the analysis often cannot see in
+full — the method set of a callee, every name a module defines, the environment
+an import resolves against — and reports anyway when that picture is
+incomplete. On a sweep of the 100 most-depended-upon registered packages their
+sampled false-positive rates were 93%, 78% and 77%, together about 92% of every
+false positive measured.
+
+They are on in `strict`, and any project can restore one:
+
+```toml
+[rules]
+missing_reference = "warning"
+```
+
+They do find real bugs — the same sweep turned up genuine `UndefVarError`s and
+`MethodError`s through them — so turning them on is worthwhile, just expect to
+tune around the noise.
+
 ### Rules
 
 Each entry under `[rules]` maps a rule id to a severity — one of `"off"`,
@@ -192,7 +215,8 @@ reports as a diagnostic code, and what `--format sarif` emits as the SARIF
 | `toml_syntax_errors` | `error` | TOML syntax errors in config, `Project.toml` and `Manifest.toml` files. |
 | `config_errors` | `error` | Invalid keys or values in a `JuliaLint.toml`, `JuliaFormat.toml` or `JuliaTestItems.toml` file. |
 | `shadowed_config` | `info` | A config file that supersedes another of the same kind in an enclosing directory (see below). |
-| `incorrect_call_args` | `info` | Possible method call errors (wrong number/type of arguments), and calls to functions with no methods. |
+| `environment_errors` | `info` | A project or test environment that could not be resolved, reported on its `Project.toml`. |
+| `incorrect_call_args` | `off` | Possible method call errors (wrong number/type of arguments), and calls to functions with no methods. Off by default; see below. |
 | `incorrect_iter_spec` | `info` | Loop iterators that will likely error. |
 | `index_from_length` | `info` | Indexing with indices from `length`/`size`; prefer `eachindex`/`axes`. |
 | `nothing_comparison` | `info` | Comparisons against `nothing` that should use `isnothing`/`===`. |
@@ -212,8 +236,14 @@ reports as a diagnostic code, and what `--format sarif` emits as the SARIF
 | `unused_binding` | `hint` | Variables assigned but never used. |
 | `relative_import` | `info` | A relative import with more leading dots than available nesting. |
 | `include_errors` | `warning` | Circular, duplicate, missing or unreadable `include`s. |
-| `missing_reference` | `warning` | Unresolved references. Takes a `scope` option: `"none"`, `"symbols"` (identifiers only) or `"all"` (the default). |
-| `unresolved_import` | `warning` | Imports whose target could not be resolved. |
+| `missing_reference` | `off` | Unresolved references. Takes a `scope` option: `"none"`, `"symbols"` (identifiers only) or `"all"` (the default). Off by default; see below. |
+| `unresolved_import` | `off` | Imports whose target could not be resolved. Off by default; see below. |
+| `nan_comparison` | `off` | Comparison against `NaN`, which is never equal to anything; use `isnan`. |
+| `duplicate_branch_condition` | `off` | The same condition tested twice in one `if`/`elseif` chain. |
+| `string_concat_style` | `off` | String literals concatenated with `*` where interpolation or `string(x, …)` reads better. |
+| `bare_using` | `off` | Bare `using Foo` rather than an explicit name list or `import Foo`. |
+| `debug_statement` | `off` | `@show`, which usually indicates a leftover debug statement. |
+| `async_task` | `off` | `@async`, which pins the task to the current thread; usually `Threads.@spawn` is wanted. |
 
 ### Overrides
 
