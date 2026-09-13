@@ -888,9 +888,17 @@ function (@main)(ARGS)
     # findings"). The raw exception stays available under `--log debug`.
     local jw, all_diagnostics
     try
+        # `scope=:lint` makes the directory walk itself honour the
+        # `include`/`exclude` globs of the `JuliaLint.toml` files it passes.
+        # Without it the globs are applied per file far downstream, when
+        # diagnostics are emitted: an excluded subtree is still read, its
+        # `Project.toml`s still become environments, and julialint still spawns
+        # an indexer process for every one of them. A batch linter has no use
+        # for files it will never report on, so prune them at the source.
         jw = workspace_from_folders([target_path],
             dynamic=JuliaWorkspaces.DynamicIndexingOnly,
             symbolcache_download=true,
+            scope=:lint,
             progress_callback=pr === nothing ? nothing : (key, msg, pct) -> _report_jw!(pr, key, msg, pct))
         # Parse everything while the environments index in the background
         # (parsing is environment-independent, so nothing is wasted), then wait
@@ -1046,6 +1054,7 @@ using PrecompileTools: @setup_workload, @compile_workload
             jw2 = workspace_from_folders([workload_dir];
                 dynamic=JuliaWorkspaces.DynamicIndexingOnly,
                 symbolcache_download=false,
+                scope=:lint,
                 store_path=mktempdir(),
                 progress_callback=(key, msg, pct) -> _report_jw!(pr, key, msg, pct))
             JuliaWorkspaces.parse_files_blocking(jw2,
