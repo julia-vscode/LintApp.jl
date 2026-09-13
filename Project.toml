@@ -1,4 +1,4 @@
-version = "1.0.2"
+version = "1.0.3-DEV"
 name = "LintApp"
 authors = ["David Anthoff <anthoff@berkeley.edu>"]
 uuid = "0ca8a2e7-ee8a-47e9-8624-e03a53d93e73"
