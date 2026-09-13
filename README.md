@@ -154,6 +154,24 @@ Globs are gitignore-style, relative to the directory holding the config file:
 `*` matches within a path segment, `**` spans segments, `?` matches a single
 character, and a pattern with no `/` matches at any depth.
 
+An excluded directory is not merely left unreported — `julialint` never walks
+it. A directory is skipped only when no file below it could be selected, so an
+excluded subtree costs nothing to discover: its files are not collected, and
+the `Project.toml`s inside it never become environments to resolve and index.
+On a repository that vendors packages or keeps test fixtures under an excluded
+directory this is the difference between hundreds of environments and a
+handful. A file an in-scope source `include`s is still read wherever it lives,
+so that the including file analyses correctly — it is parsed, and still never
+linted.
+
+The flip side is that **an excluded subtree's `Project.toml` and
+`Manifest.toml` are not read either**. A package that is in scope but whose
+environment reaches into an excluded directory — through `[sources]`, or a
+relative `dev` path — will have that environment resolved incompletely, and
+lint results that depend on it degrade accordingly. Exclude directories that
+hold data, not directories that hold environments an in-scope package depends
+on.
+
 ### Presets
 
 | Preset | Description |

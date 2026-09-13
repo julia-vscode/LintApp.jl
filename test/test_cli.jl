@@ -61,6 +61,40 @@ end
     @test !occursin("bad.jl", lowercase(out))
 end
 
+@testitem "JuliaLint.toml exclude prunes the directory walk" setup=[CLIHelper] begin
+    run_cli, CLEAN, SYNTAX_ERROR = CLIHelper.run_cli, CLIHelper.CLEAN, CLIHelper.SYNTAX_ERROR
+
+    dir = mktempdir()
+    for name in ("a.jl", "b.jl", "c.jl")
+        write(joinpath(dir, name), CLEAN)
+    end
+
+    # A vendored subtree with its own environment: exactly the shape that used
+    # to cost an indexer child process despite being excluded.
+    mkpath(joinpath(dir, "vendor"))
+    write(joinpath(dir, "vendor", "bad.jl"), SYNTAX_ERROR)
+    write(joinpath(dir, "vendor", "other.jl"), CLEAN)
+    write(joinpath(dir, "vendor", "Project.toml"), """
+    name = "Vendored"
+    uuid = "3a1e2b4c-5d6f-4a7b-8c9d-0e1f2a3b4c5d"
+    """)
+    write(joinpath(dir, "JuliaLint.toml"), """
+    exclude = ["vendor/**"]
+    """)
+
+    code, out, err = run_cli([dir])
+    @test code == 0
+    @test !occursin("bad.jl", lowercase(out))
+
+    # The excluded files are not merely unreported — they are never read. The
+    # parse counter on stderr covers exactly the files the walk collected, so
+    # it is 3 (the root sources) and not 5, and `vendor/Project.toml` never
+    # becomes an environment to resolve.
+    m = match(r"Parsing files \(\d+/(\d+)\)", err)
+    @test m !== nothing
+    @test parse(Int, m[1]) == 3
+end
+
 @testitem "json output" setup=[CLIHelper] begin
     using JSON
 
