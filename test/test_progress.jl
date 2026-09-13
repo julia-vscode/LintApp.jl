@@ -199,38 +199,90 @@ end
 end
 
 @testitem "progress key display names" begin
-    @test LintApp._key_display_name("index:/proj/MyPkg") == "MyPkg"
-    @test LintApp._key_display_name("index:/proj/MyPkg/") == "MyPkg"
-    @test LintApp._key_display_name("index:C:\\proj\\MyPkg") == "MyPkg"
-    @test LintApp._key_display_name("index:/proj/a:TestPkg") == "TestPkg"
-    @test LintApp._key_display_name("index:C:\\proj\\a:TestPkg") == "TestPkg"
-    @test LintApp._key_display_name("download:C:\\envs\\v1.12") == "v1.12"
+    # Without a lint target every environment keeps its absolute path.
+    @test LintApp._key_display_name("index:/proj/MyPkg") == "/proj/MyPkg"
+    @test LintApp._key_display_name("index:/proj/MyPkg/") == "/proj/MyPkg"
+
+    # Relative to the lint target, which is what makes a large environment
+    # count legible: these are nested projects, and only the path says so.
+    root = Sys.iswindows() ? "C:\\proj" : "/proj"
+    @test LintApp._key_display_name("index:" * joinpath(root, "packages", "Foo"), root) == "packages/Foo"
+    @test LintApp._key_display_name("index:" * joinpath(root, "docs"), root) == "docs"
+
+    # The target itself is named, not rendered as ".".
+    @test LintApp._key_display_name("index:" * root, root) == "proj"
+
+    # A path outside the target stays absolute.
+    outside = Sys.iswindows() ? "C:\\elsewhere\\Other" : "/elsewhere/Other"
+    @test LintApp._key_display_name("index:" * outside, root) == "C:/elsewhere/Other" ||
+          LintApp._key_display_name("index:" * outside, root) == "/elsewhere/Other"
+
+    # A case-only difference between the target and the key (Windows paths
+    # round-trip through URIs) still resolves to the relative form.
+    @test LintApp._key_display_name("index:" * joinpath(root, "docs"), uppercase(root)) ==
+          (Sys.iswindows() ? "docs" : LintApp._display_path(joinpath(root, "docs"), ""))
+
+    # Test-environment keys carry the package name after the path. Tagging the
+    # path beats showing the bare package name: a package and its test
+    # environment are then distinguishable, and so are same-named packages.
+    @test LintApp._key_display_name("index:/proj/a:TestPkg") == "/proj/a (test env)"
+    @test LintApp._key_display_name("index:" * joinpath(root, "a") * ":TestPkg", root) == "a (test env)"
+
+    # A Windows drive letter is not a package name: parse from the right.
+    @test LintApp._key_display_name("index:C:\\proj\\MyPkg") == "C:/proj/MyPkg"
+    @test LintApp._key_display_name("download:C:\\envs\\v1.12") == "C:/envs/v1.12"
 end
 
 @testitem "showvalues detail lines" begin
+    root = Sys.iswindows() ? "C:\\p" : "/p"
     active = Dict(
-        "index:/p/a" => (10, "Indexing a..."),
-        "index:/p/b" => (80, "Indexing b..."),
-        "index:/p/c" => (50, "Indexing c..."),
+        "index:" * joinpath(root, "a") => (10, "Indexing a..."),
+        "index:" * joinpath(root, "b") => (80, "Indexing b..."),
+        "index:" * joinpath(root, "c") => (50, "Indexing c..."),
     )
-    vals = LintApp._active_showvalues(active)
+    vals = LintApp._active_showvalues(active, root, 80)
     @test vals == [("b", "80% — Indexing b..."),
                    ("c", "50% — Indexing c..."),
                    ("a", "10% — Indexing a...")]
 
-    # More active keys than lines: cap and summarize the rest.
-    active = Dict("index:/p/x$i" => (i, "m") for i in 1:6)
-    vals = LintApp._active_showvalues(active)
+    # More active keys than lines: cap and summarize the rest. Names are padded
+    # to a common width so the percentages line up under each other.
+    active = Dict("index:" * joinpath(root, "x$i") => (i, "m") for i in 1:6)
+    vals = LintApp._active_showvalues(active, root, 80)
     @test length(vals) == 5
-    @test last(vals) == ("…", "+2 more")
+    @test last(vals) == ("… ", "+2 more")
 
     # The per-environment package counter "(i/n)" is stripped: next to the
     # environment percentage, a second unrelated counter only confuses.
-    active = Dict("index:/p/Mimi" => (38, "Indexing Mimi (2/2)..."),
-                  "index:/p/a" => (17, "Indexing Foo_jll (1/1)..."))
-    vals = LintApp._active_showvalues(active)
+    active = Dict("index:" * joinpath(root, "Mimi") => (38, "Indexing Mimi (2/2)..."),
+                  "index:" * joinpath(root, "a") => (17, "Indexing Foo_jll (1/1)..."))
+    vals = LintApp._active_showvalues(active, root, 80)
     @test vals == [("Mimi", "38% — Indexing Mimi..."),
-                   ("a", "17% — Indexing Foo_jll...")]
+                   ("a   ", "17% — Indexing Foo_jll...")]
+
+    # A long path elides from the left, keeping the distinguishing tail.
+    deep = joinpath(root, "packages", "Preferences", "test", "UsesPreferences")
+    vals = LintApp._active_showvalues(Dict("index:" * deep => (5, "Indexing...")), root, 60)
+    name = first(only(vals))
+    @test startswith(name, "…")
+    @test endswith(name, "test/UsesPreferences")
+    @test length(name) == LintApp._name_budget(60)
+
+    # The "(test env)" tag sits in the tail, so it survives elision.
+    vals = LintApp._active_showvalues(Dict("index:" * deep * ":UsesPreferences" => (5, "Starting...")), root, 60)
+    @test endswith(first(only(vals)), " (test env)")
+end
+
+@testitem "index detail lines name environments by path" begin
+    root = Sys.iswindows() ? "C:\\ws" : "/ws"
+    io = IOBuffer()
+    pr = LintApp.ProgressReporter(io, true; root=root)
+    LintApp._report_jw!(pr, "index:" * joinpath(root, "docs"), "Queued for indexing...", 0)
+    f = LintApp._render_frame(pr, 100)
+    idx = findfirst(l -> occursin("Indexing environments", l), f)
+    @test idx !== nothing
+    @test occursin("    docs", f[idx+1])
+    @test occursin("0% — Queued for indexing...", f[idx+1])
 end
 
 @testitem "ProgressReporter plain-mode throttling" begin
