@@ -395,6 +395,7 @@ mutable struct ProgressReporter
     io::IO
     live::Bool
     color::Bool                                  # live mode: ANSI-color the bars
+    root::String                                 # lint target; environments are named relative to it
     lock::ReentrantLock
     phase_active::Dict{String,Dict{String,Tuple{Int,String}}}  # phase -> (active key -> (latest pct, latest message))
     phase_seen::Dict{String,Set{String}}         # phase -> every key ever active
@@ -413,8 +414,8 @@ mutable struct ProgressReporter
     t0::Float64
 end
 
-ProgressReporter(io::IO, live::Bool; color::Bool=false) = ProgressReporter(
-    io, live, color, ReentrantLock(),
+ProgressReporter(io::IO, live::Bool; color::Bool=false, root::AbstractString="") = ProgressReporter(
+    io, live, color, String(root), ReentrantLock(),
     Dict{String,Dict{String,Tuple{Int,String}}}(), Dict{String,Set{String}}(), Dict{String,Int}(),
     ["parse", "index", "download", "lint"], Set{String}(),
     0, 0, 0, 0, 0.0, "", 0, 0, false, time())
@@ -509,35 +510,66 @@ end
 # Label up to the "(k/n)" counter, for phase-transition detection.
 _label_head(s::AbstractString) = String(first(split(s, " (")))
 
-# Human name for a JW progress key: "index:<path>" -> basename of the path,
-# "index:<path>:<pkg>" -> the package name. Parse from the right because
-# Windows paths contain ':' themselves.
-function _key_display_name(key::String)
+# An environment path as the progress block shows it: relative to the lint
+# target when it lies inside it (the normal case), absolute otherwise. The
+# relative path is what makes the environment count legible — a workspace with
+# a hundred of them has them nested under `packages/`, `docs/`, `test/`, and
+# only the path says so; a bare basename like `v1.0` says nothing, and repeats.
+#
+# Separators are normalized the way `_output_sarif` does it. The containment
+# test is a case-folded prefix check rather than `relpath` because the key's
+# path has been through a URI and may differ in case from the path the user
+# typed, which `relpath` would answer with a chain of "..".
+function _display_path(path::AbstractString, root::AbstractString)
+    p = rstrip(replace(normpath(String(path)), '\\' => '/'), '/')
+    isempty(root) && return p
+    r = rstrip(replace(normpath(String(root)), '\\' => '/'), '/')
+    fold = Sys.iswindows() ? lowercase : identity
+    fold(p) == fold(r) && return String(last(split(r, '/')))
+    prefix = fold(r) * "/"
+    startswith(fold(p), prefix) && return chop(p, head=length(prefix), tail=0)
+    return p
+end
+
+# Human name for a JW progress key: "index:<path>" -> the environment's path,
+# "index:<path>:<pkg>" -> that package's test environment. Parse from the right
+# because Windows paths contain ':' themselves. The other three work-item kinds
+# all serialize to a plain "index:<path>", so the test-environment tag is the
+# only kind distinction the key carries.
+function _key_display_name(key::String, root::AbstractString="")
     i = findfirst(==(':'), key)
     suffix = i === nothing ? key : key[nextind(key, i):end]
     parts = rsplit(suffix, ':', limit=2)
     if length(parts) == 2 && !occursin('\\', parts[2]) && !occursin('/', parts[2])
-        return String(parts[2])
+        return string(_display_path(parts[1], root), " (test env)")
     end
-    # Split on both separators rather than calling `basename`, which only knows
-    # about '\\' when it runs on Windows: these keys carry whatever paths the
-    # machine that produced them uses.
-    name = String(last(split(rstrip(suffix, ('/', '\\')), ('/', '\\'))))
-    return isempty(name) ? suffix : name
+    return _display_path(suffix, root)
 end
 
+# How much of a detail line the environment name may take before it is elided.
+# The rest carries the percentage and message, so split the width between them.
+_name_budget(width::Int) = clamp((width - 6) ÷ 2, 16, 48)
+
+# Elide from the left: the tail of a path is what distinguishes it from its
+# siblings, and it is where the "(test env)" tag sits.
+_elide_left(s::AbstractString, n::Int) = length(s) <= n ? String(s) : string("…", last(s, n - 1))
+
 # Sub-status (name, text) pairs for the active keys of a phase: the busiest
-# few environments with their latest percentage and message. The "(i/n)"
+# few environments with their latest percentage and message. Names are padded
+# to a common width so the percentages line up under each other. The "(i/n)"
 # package counter inside indexer messages is stripped: it counts packages
 # within that environment, and next to the environment percentage two
 # unrelated counters on one line just confuse.
-function _active_showvalues(active::Dict{String,Tuple{Int,String}}; max_lines::Int=4)
+function _active_showvalues(active::Dict{String,Tuple{Int,String}}, root::AbstractString="", width::Int=80; max_lines::Int=4)
     entries = sort!(collect(active); by=kv -> (-kv[2][1], kv[1]))
+    budget = _name_budget(width)
     vals = Tuple{String,String}[
-        (_key_display_name(k), string(pct, "% — ", replace(msg, r" \(\d+/\d+\)" => "")))
+        (_elide_left(_key_display_name(k, root), budget),
+         string(pct, "% — ", replace(msg, r" \(\d+/\d+\)" => "")))
         for (k, (pct, msg)) in first(entries, max_lines)]
     length(entries) > max_lines && push!(vals, ("…", string("+", length(entries) - max_lines, " more")))
-    return vals
+    namew = maximum(length(first(v)) for v in vals; init=0)
+    return Tuple{String,String}[(rpad(n, namew), v) for (n, v) in vals]
 end
 
 # A modest fixed-width bar reads better than one spanning the whole terminal,
@@ -638,7 +670,7 @@ function _render_frame(pr::ProgressReporter, width::Int)
             total = max(length(get(() -> Set{String}(), pr.phase_seen, phase)), done, 1)
             push!(lines, _bar_line(desc, done, total, blen, width, pr.color))
             if active !== nothing && !isempty(active)
-                for (n, v) in _active_showvalues(active; max_lines=2)
+                for (n, v) in _active_showvalues(active, pr.root, width; max_lines=2)
                     push!(lines, detail(string("    ", n, "  ", v)))
                 end
             end
@@ -878,7 +910,7 @@ function (@main)(ARGS)
         nothing
     else
         ProgressReporter(stderr, stderr isa Base.TTY && log_level === nothing;
-                         color=Base.get_have_color())
+                         color=Base.get_have_color(), root=target_path)
     end
 
     # --- Lint ---
@@ -1050,7 +1082,7 @@ using PrecompileTools: @setup_workload, @compile_workload
         Logging.with_logger(Logging.NullLogger()) do
             # Exercise the progress path too, into a throwaway buffer, so its
             # specializations land in the pkgimage.
-            pr = ProgressReporter(IOBuffer(), false)
+            pr = ProgressReporter(IOBuffer(), false; root=workload_dir)
             jw2 = workspace_from_folders([workload_dir];
                 dynamic=JuliaWorkspaces.DynamicIndexingOnly,
                 symbolcache_download=false,
@@ -1066,7 +1098,7 @@ using PrecompileTools: @setup_workload, @compile_workload
 
             # Replay the live (ProgressMeter-backed) rendering path into a
             # buffer so its specializations land in the pkgimage too.
-            prl = ProgressReporter(IOBuffer(), true; color=true)
+            prl = ProgressReporter(IOBuffer(), true; color=true, root=workload_dir)
             _report_jw!(prl, "bootstrap", "Booting...", 0)
             _report_parse!(prl, 1, 2)
             _report_parse!(prl, 2, 2)
